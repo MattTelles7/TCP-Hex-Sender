@@ -1,4 +1,5 @@
 import re
+import select
 import socket
 import sys
 from dataclasses import dataclass
@@ -24,9 +25,12 @@ from PySide6.QtWidgets import (
 
 HEX_CLEAN_RE = re.compile(r"\s+", re.MULTILINE)
 HEX_PREFIX_RE = re.compile(r"0x", re.IGNORECASE)
-HEADER_END = b"\r\n\r\n"
 CONNECT_TIMEOUT_S = 3.0
-HTTP_READ_TIMEOUT_S = 3.0
+
+# Device-style read behavior:
+# - Wait up to FIRST_BYTE_TIMEOUT_S for the first response byte.
+# - Then keep reading until no new bytes arrive for RAW_IDLE_TIMEOUT_S.
+FIRST_BYTE_TIMEOUT_S = 5.0
 RAW_IDLE_TIMEOUT_S = 0.5
 
 
@@ -36,14 +40,6 @@ class HexParseResult:
     error: str
     payload: bytes
     normalized_hex: str
-
-
-@dataclass
-class HttpReadResult:
-    raw_response: bytes
-    leftover: bytes
-    note: str
-    peer_closed: bool
 
 
 @dataclass
@@ -102,41 +98,29 @@ def parse_hex_input(raw_text: str) -> HexParseResult:
     return HexParseResult(True, "", payload, normalized_hex)
 
 
-def parse_headers(header_bytes: bytes) -> dict[str, list[str]]:
-    lines = header_bytes.split(b"\r\n")
-    if not lines or lines[0] == b"":
-        raise ValueError("Malformed HTTP response: missing status line.")
-
-    headers: dict[str, list[str]] = {}
-    for line in lines[1:]:
-        if line == b"":
-            continue
-        if b":" not in line:
-            raise ValueError("Malformed HTTP response header line.")
-        name, value = line.split(b":", 1)
-        key = name.decode("iso-8859-1", errors="replace").strip().lower()
-        val = value.decode("iso-8859-1", errors="replace").strip()
-        headers.setdefault(key, []).append(val)
-    return headers
-
-
-def _recv_into_buffer(sock: socket.socket, buffer: bytearray) -> None:
-    chunk = sock.recv(4096)
-    if chunk == b"":
-        raise ConnectionClosedError("Peer closed the connection.")
-    buffer.extend(chunk)
-
-
-def _read_until_marker(sock: socket.socket, buffer: bytearray, marker: bytes, timeout_s: float) -> None:
-    sock.settimeout(timeout_s)
-    while marker not in buffer:
-        _recv_into_buffer(sock, buffer)
-
-
-def read_raw_response_idle(sock: socket.socket, initial_buffer: bytes, idle_timeout_s: float = RAW_IDLE_TIMEOUT_S) -> RawReadResult:
+def read_raw_response_wait_idle(
+    sock: socket.socket,
+    initial_buffer: bytes,
+    first_byte_timeout_s: float = FIRST_BYTE_TIMEOUT_S,
+    idle_timeout_s: float = RAW_IDLE_TIMEOUT_S,
+) -> RawReadResult:
+    """
+    Wait up to first_byte_timeout_s for the first byte to arrive (if none already),
+    then keep reading until no new bytes arrive for idle_timeout_s.
+    This matches how many device/test tools behave (e.g., 5000ms read timeout).
+    """
     body = bytearray(initial_buffer)
     peer_closed = False
 
+    if not body:
+        ready, _, _ = select.select([sock], [], [], first_byte_timeout_s)
+        if not ready:
+            return RawReadResult(
+                raw_response=b"",
+                note=f"No response bytes received within first-byte timeout ({first_byte_timeout_s:.1f} s).",
+                peer_closed=False,
+            )
+
     sock.settimeout(idle_timeout_s)
     while True:
         try:
@@ -148,128 +132,11 @@ def read_raw_response_idle(sock: socket.socket, initial_buffer: bytes, idle_time
         except socket.timeout:
             break
 
-    note = f"Used raw read idle-timeout fallback ({int(idle_timeout_s * 1000)} ms)."
-    return RawReadResult(raw_response=bytes(body), note=note, peer_closed=peer_closed)
-
-
-def _readline_crlf(sock: socket.socket, buffer: bytearray, timeout_s: float) -> bytes:
-    sock.settimeout(timeout_s)
-    while True:
-        idx = buffer.find(b"\r\n")
-        if idx != -1:
-            line = bytes(buffer[: idx + 2])
-            del buffer[: idx + 2]
-            return line
-        _recv_into_buffer(sock, buffer)
-
-
-def _read_exact(sock: socket.socket, buffer: bytearray, size: int, timeout_s: float) -> bytes:
-    sock.settimeout(timeout_s)
-    while len(buffer) < size:
-        _recv_into_buffer(sock, buffer)
-    out = bytes(buffer[:size])
-    del buffer[:size]
-    return out
-
-
-def _read_chunked_wire_body(sock: socket.socket, buffer: bytearray, timeout_s: float) -> bytes:
-    wire = bytearray()
-
-    while True:
-        chunk_size_line = _readline_crlf(sock, buffer, timeout_s)
-        wire.extend(chunk_size_line)
-
-        size_text = chunk_size_line[:-2].split(b";", 1)[0].strip()
-        if size_text == b"":
-            raise ValueError("Malformed chunked response: missing chunk size.")
-
-        try:
-            chunk_size = int(size_text, 16)
-        except ValueError as exc:
-            raise ValueError("Malformed chunked response: invalid chunk size.") from exc
-
-        if chunk_size > 0:
-            chunk_plus_crlf = _read_exact(sock, buffer, chunk_size + 2, timeout_s)
-            if chunk_plus_crlf[-2:] != b"\r\n":
-                raise ValueError("Malformed chunked response: missing CRLF after chunk data.")
-            wire.extend(chunk_plus_crlf)
-            continue
-
-        while True:
-            trailer_line = _readline_crlf(sock, buffer, timeout_s)
-            wire.extend(trailer_line)
-            if trailer_line == b"\r\n":
-                break
-        break
-
-    return bytes(wire)
-
-
-def read_http_response(sock: socket.socket, initial_buffer: bytes, idle_timeout_s: float = RAW_IDLE_TIMEOUT_S) -> HttpReadResult:
-    buffer = bytearray(initial_buffer)
-
-    _read_until_marker(sock, buffer, HEADER_END, timeout_s=HTTP_READ_TIMEOUT_S)
-    header_end_idx = buffer.find(HEADER_END)
-    header_and_status = bytes(buffer[:header_end_idx])
-    headers_wire = bytes(buffer[: header_end_idx + 4])
-    del buffer[: header_end_idx + 4]
-
-    headers = parse_headers(header_and_status)
-    transfer_values = ",".join(headers.get("transfer-encoding", [])).lower()
-    content_length_values = headers.get("content-length", [])
-
-    if "chunked" in transfer_values:
-        body_wire = _read_chunked_wire_body(sock, buffer, timeout_s=HTTP_READ_TIMEOUT_S)
-        return HttpReadResult(
-            raw_response=headers_wire + body_wire,
-            leftover=bytes(buffer),
-            note="",
-            peer_closed=False,
-        )
-
-    if content_length_values:
-        last_value = content_length_values[-1]
-        try:
-            body_len = int(last_value)
-        except ValueError as exc:
-            raise ValueError("Malformed Content-Length header.") from exc
-
-        if body_len < 0:
-            raise ValueError("Malformed Content-Length header.")
-
-        body = _read_exact(sock, buffer, body_len, timeout_s=3.0)
-        return HttpReadResult(
-            raw_response=headers_wire + body,
-            leftover=bytes(buffer),
-            note="",
-            peer_closed=False,
-        )
-
-    body = bytearray(buffer)
-    buffer.clear()
-    used_idle_timeout = False
-    peer_closed = False
-
-    sock.settimeout(idle_timeout_s)
-    while True:
-        try:
-            chunk = sock.recv(4096)
-            if chunk == b"":
-                peer_closed = True
-                break
-            body.extend(chunk)
-        except socket.timeout:
-            used_idle_timeout = True
-            break
-
-    note = "Used idle-timeout fallback (500 ms) while reading response body." if used_idle_timeout else ""
-
-    return HttpReadResult(
-        raw_response=headers_wire + bytes(body),
-        leftover=bytes(buffer),
-        note=note,
-        peer_closed=peer_closed,
+    note = (
+        f"Raw read: waited up to {first_byte_timeout_s:.1f}s for first byte, "
+        f"then read until idle ({int(idle_timeout_s * 1000)} ms)."
     )
+    return RawReadResult(raw_response=bytes(body), note=note, peer_closed=peer_closed)
 
 
 class TcpWorker(QObject):
@@ -346,12 +213,26 @@ class TcpWorker(QObject):
             return
 
         try:
+            # WRITE
             self._sock.sendall(payload)
-            read_result = read_http_response(self._sock, self._recv_buffer)
-            self._recv_buffer = read_result.leftover
-            self.send_result.emit(payload, read_result.raw_response, read_result.note)
 
-            if read_result.peer_closed:
+            # READ (raw device-friendly read; do not assume HTTP)
+            raw_result = read_raw_response_wait_idle(
+                self._sock,
+                initial_buffer=self._recv_buffer,
+                first_byte_timeout_s=FIRST_BYTE_TIMEOUT_S,
+                idle_timeout_s=RAW_IDLE_TIMEOUT_S,
+            )
+
+            # We consumed any pending data for this request cycle
+            self._recv_buffer = b""
+
+            if raw_result.raw_response:
+                self.send_result.emit(payload, raw_result.raw_response, raw_result.note)
+            else:
+                self.error.emit(raw_result.note)
+
+            if raw_result.peer_closed:
                 try:
                     self._sock.close()
                 except OSError:
@@ -359,40 +240,6 @@ class TcpWorker(QObject):
                 self._sock = None
                 self._recv_buffer = b""
                 self.disconnected.emit("Peer closed the connection.")
-
-        except (socket.timeout, ValueError):
-            if self._sock is None:
-                self.error.emit("Send/read failed: socket not available.")
-                return
-
-            try:
-                raw_result = read_raw_response_idle(self._sock, self._recv_buffer)
-                self._recv_buffer = b""
-
-                if raw_result.raw_response:
-                    self.send_result.emit(payload, raw_result.raw_response, raw_result.note)
-                else:
-                    self.error.emit(
-                        f"No response bytes received within HTTP timeout ({int(HTTP_READ_TIMEOUT_S)} s) and raw idle timeout ({int(RAW_IDLE_TIMEOUT_S * 1000)} ms)."
-                    )
-
-                if raw_result.peer_closed:
-                    try:
-                        self._sock.close()
-                    except OSError:
-                        pass
-                    self._sock = None
-                    self._recv_buffer = b""
-                    self.disconnected.emit("Peer closed the connection.")
-            except OSError as exc:
-                try:
-                    self._sock.close()
-                except OSError:
-                    pass
-                self._sock = None
-                self._recv_buffer = b""
-                self.error.emit(f"Send/read failed: {exc}")
-                self.disconnected.emit("Socket closed due to error.")
 
         except (ConnectionClosedError, OSError) as exc:
             try:
