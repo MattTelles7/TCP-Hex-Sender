@@ -2,6 +2,7 @@ import re
 import select
 import socket
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -31,7 +32,8 @@ CONNECT_TIMEOUT_S = 3.0
 # - Wait up to FIRST_BYTE_TIMEOUT_S for the first response byte.
 # - Then keep reading until no new bytes arrive for RAW_IDLE_TIMEOUT_S.
 FIRST_BYTE_TIMEOUT_S = 5.0
-RAW_IDLE_TIMEOUT_S = 0.5
+RAW_IDLE_TIMEOUT_S = 0.75
+RAW_MAX_TOTAL_TIMEOUT_S = 10.0
 
 
 @dataclass
@@ -103,6 +105,7 @@ def read_raw_response_wait_idle(
     initial_buffer: bytes,
     first_byte_timeout_s: float = FIRST_BYTE_TIMEOUT_S,
     idle_timeout_s: float = RAW_IDLE_TIMEOUT_S,
+    max_total_timeout_s: float = RAW_MAX_TOTAL_TIMEOUT_S,
 ) -> RawReadResult:
     """
     Wait up to first_byte_timeout_s for the first byte to arrive (if none already),
@@ -111,6 +114,8 @@ def read_raw_response_wait_idle(
     """
     body = bytearray(initial_buffer)
     peer_closed = False
+    start_time = time.monotonic()
+    stop_reason = ""
 
     if not body:
         ready, _, _ = select.select([sock], [], [], first_byte_timeout_s)
@@ -121,20 +126,31 @@ def read_raw_response_wait_idle(
                 peer_closed=False,
             )
 
-    sock.settimeout(idle_timeout_s)
     while True:
+        elapsed = time.monotonic() - start_time
+        remaining_total = max_total_timeout_s - elapsed
+        if remaining_total <= 0:
+            stop_reason = f"max-total timeout ({max_total_timeout_s:.1f} s)"
+            break
+
+        sock.settimeout(min(idle_timeout_s, remaining_total))
         try:
             chunk = sock.recv(4096)
             if chunk == b"":
                 peer_closed = True
+                stop_reason = "peer closed"
                 break
             body.extend(chunk)
         except socket.timeout:
+            stop_reason = f"idle timeout ({int(idle_timeout_s * 1000)} ms)"
             break
 
+    total_elapsed = time.monotonic() - start_time
     note = (
-        f"Raw read: waited up to {first_byte_timeout_s:.1f}s for first byte, "
-        f"then read until idle ({int(idle_timeout_s * 1000)} ms)."
+        f"Raw read: first-byte wait {first_byte_timeout_s:.1f}s, "
+        f"read-until-idle {int(idle_timeout_s * 1000)} ms, "
+        f"max-total {max_total_timeout_s:.1f}s, "
+        f"stop={stop_reason}, bytes={len(body)}, elapsed={total_elapsed:.3f}s."
     )
     return RawReadResult(raw_response=bytes(body), note=note, peer_closed=peer_closed)
 
