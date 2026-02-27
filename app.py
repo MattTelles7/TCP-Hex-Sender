@@ -3,12 +3,13 @@ import select
 import socket
 import sys
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtGui import QFont, QTextOption
+from PySide6.QtGui import QFont, QIcon, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
     QGridLayout,
@@ -277,6 +278,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("TCP Hex Sender")
+        icon_path = Path(__file__).resolve().parent / "icon.jpg"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1000, 760)
 
         self._is_connected = False
@@ -485,6 +489,9 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
+    icon_path = Path(__file__).resolve().parent / "icon.jpg"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
     window.show()
     return app.exec()
