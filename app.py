@@ -25,6 +25,9 @@ from PySide6.QtWidgets import (
 HEX_CLEAN_RE = re.compile(r"\s+", re.MULTILINE)
 HEX_PREFIX_RE = re.compile(r"0x", re.IGNORECASE)
 HEADER_END = b"\r\n\r\n"
+CONNECT_TIMEOUT_S = 3.0
+HTTP_READ_TIMEOUT_S = 3.0
+RAW_IDLE_TIMEOUT_S = 0.5
 
 
 @dataclass
@@ -39,6 +42,13 @@ class HexParseResult:
 class HttpReadResult:
     raw_response: bytes
     leftover: bytes
+    note: str
+    peer_closed: bool
+
+
+@dataclass
+class RawReadResult:
+    raw_response: bytes
     note: str
     peer_closed: bool
 
@@ -123,6 +133,25 @@ def _read_until_marker(sock: socket.socket, buffer: bytearray, marker: bytes, ti
         _recv_into_buffer(sock, buffer)
 
 
+def read_raw_response_idle(sock: socket.socket, initial_buffer: bytes, idle_timeout_s: float = RAW_IDLE_TIMEOUT_S) -> RawReadResult:
+    body = bytearray(initial_buffer)
+    peer_closed = False
+
+    sock.settimeout(idle_timeout_s)
+    while True:
+        try:
+            chunk = sock.recv(4096)
+            if chunk == b"":
+                peer_closed = True
+                break
+            body.extend(chunk)
+        except socket.timeout:
+            break
+
+    note = f"Used raw read idle-timeout fallback ({int(idle_timeout_s * 1000)} ms)."
+    return RawReadResult(raw_response=bytes(body), note=note, peer_closed=peer_closed)
+
+
 def _readline_crlf(sock: socket.socket, buffer: bytearray, timeout_s: float) -> bytes:
     sock.settimeout(timeout_s)
     while True:
@@ -176,10 +205,10 @@ def _read_chunked_wire_body(sock: socket.socket, buffer: bytearray, timeout_s: f
     return bytes(wire)
 
 
-def read_http_response(sock: socket.socket, initial_buffer: bytes, idle_timeout_s: float = 0.5) -> HttpReadResult:
+def read_http_response(sock: socket.socket, initial_buffer: bytes, idle_timeout_s: float = RAW_IDLE_TIMEOUT_S) -> HttpReadResult:
     buffer = bytearray(initial_buffer)
 
-    _read_until_marker(sock, buffer, HEADER_END, timeout_s=3.0)
+    _read_until_marker(sock, buffer, HEADER_END, timeout_s=HTTP_READ_TIMEOUT_S)
     header_end_idx = buffer.find(HEADER_END)
     header_and_status = bytes(buffer[:header_end_idx])
     headers_wire = bytes(buffer[: header_end_idx + 4])
@@ -190,7 +219,7 @@ def read_http_response(sock: socket.socket, initial_buffer: bytes, idle_timeout_
     content_length_values = headers.get("content-length", [])
 
     if "chunked" in transfer_values:
-        body_wire = _read_chunked_wire_body(sock, buffer, timeout_s=3.0)
+        body_wire = _read_chunked_wire_body(sock, buffer, timeout_s=HTTP_READ_TIMEOUT_S)
         return HttpReadResult(
             raw_response=headers_wire + body_wire,
             leftover=bytes(buffer),
@@ -266,14 +295,27 @@ class TcpWorker(QObject):
             self.disconnected.emit("Already connected. Disconnect first.")
             return
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3.0)
-
         try:
-            sock.connect((host, port))
-        except Exception as exc:
-            sock.close()
+            addr_infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except OSError as exc:
             self.error.emit(f"Connect failed: {exc}")
+            return
+
+        connect_error: Optional[Exception] = None
+        sock: Optional[socket.socket] = None
+        for family, socktype, proto, _canonname, sockaddr in addr_infos:
+            candidate = socket.socket(family, socktype, proto)
+            candidate.settimeout(CONNECT_TIMEOUT_S)
+            try:
+                candidate.connect(sockaddr)
+                sock = candidate
+                break
+            except Exception as exc:
+                connect_error = exc
+                candidate.close()
+
+        if sock is None:
+            self.error.emit(f"Connect failed: {connect_error}")
             return
 
         self._sock = sock
@@ -318,7 +360,41 @@ class TcpWorker(QObject):
                 self._recv_buffer = b""
                 self.disconnected.emit("Peer closed the connection.")
 
-        except (ConnectionClosedError, OSError, socket.timeout, ValueError) as exc:
+        except (socket.timeout, ValueError):
+            if self._sock is None:
+                self.error.emit("Send/read failed: socket not available.")
+                return
+
+            try:
+                raw_result = read_raw_response_idle(self._sock, self._recv_buffer)
+                self._recv_buffer = b""
+
+                if raw_result.raw_response:
+                    self.send_result.emit(payload, raw_result.raw_response, raw_result.note)
+                else:
+                    self.error.emit(
+                        f"No response bytes received within HTTP timeout ({int(HTTP_READ_TIMEOUT_S)} s) and raw idle timeout ({int(RAW_IDLE_TIMEOUT_S * 1000)} ms)."
+                    )
+
+                if raw_result.peer_closed:
+                    try:
+                        self._sock.close()
+                    except OSError:
+                        pass
+                    self._sock = None
+                    self._recv_buffer = b""
+                    self.disconnected.emit("Peer closed the connection.")
+            except OSError as exc:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
+                self._recv_buffer = b""
+                self.error.emit(f"Send/read failed: {exc}")
+                self.disconnected.emit("Socket closed due to error.")
+
+        except (ConnectionClosedError, OSError) as exc:
             try:
                 if self._sock is not None:
                     self._sock.close()
@@ -360,11 +436,11 @@ class MainWindow(QMainWindow):
         top_row = QGridLayout()
         top_row.setHorizontalSpacing(8)
 
-        self.host_input = QLineEdit("127.0.0.1")
+        self.host_input = QLineEdit("ci009ngppad-010")
         self.host_input.setPlaceholderText("Host")
         self.port_input = QSpinBox()
         self.port_input.setRange(1, 65535)
-        self.port_input.setValue(443)
+        self.port_input.setValue(12345)
 
         self.connect_btn = QPushButton("Connect")
         self.status_label = QLabel("Disconnected")
@@ -380,7 +456,7 @@ class MainWindow(QMainWindow):
 
         self.hex_label = QLabel("Hex Message")
         self.hex_edit = QPlainTextEdit()
-        self.hex_edit.setPlaceholderText("Type raw hex bytes here. Example: 02 00 0A FF")
+        self.hex_edit.setPlaceholderText("Type raw hex bytes here. Example: 0F31310E")
         self.hex_edit.setMinimumHeight(140)
         self.hex_error_label = QLabel("")
         self.hex_error_label.setStyleSheet("color: #B00020;")
