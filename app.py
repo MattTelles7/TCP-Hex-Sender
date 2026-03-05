@@ -434,7 +434,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("TCP Hex Sender")
 
         # Optional icon support (same directory as the script)
-        icon_path = Path(__file__).resolve().parent / "icon.jpg"
+        icon_path = Path(__file__).resolve().parent / "icon.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
@@ -834,7 +834,7 @@ def main() -> int:
     app = QApplication(sys.argv)
 
     # Optional global app icon (same directory as the script)
-    icon_path = Path(__file__).resolve().parent / "icon.jpg"
+    icon_path = Path(__file__).resolve().parent / "icon.png"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
