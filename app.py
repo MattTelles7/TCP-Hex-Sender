@@ -65,8 +65,8 @@ HISTORY_PATH = Path(__file__).resolve().parent / "tcp_hex_history.yaml"
 # The UI will still work even if some are blank, but sending blank bytes is usually meaningless.
 # --------------------------------------------------------------------------------------
 PRESET_HEX: dict[str, str] = {
-    "Ping": "0F31310E",          # Example from your screenshot/testing
-    "Cancel": "",               # TODO: fill with real bytes
+    "Ping": "0F31310E",
+    "Cancel": "0237320306",
     "Pair": "",                 # TODO: fill with real bytes
     "Get Card": "",             # TODO: fill with real bytes
     "Start Transaction": "",    # TODO: fill with real bytes
