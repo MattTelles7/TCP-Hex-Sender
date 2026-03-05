@@ -486,7 +486,7 @@ class MainWindow(QMainWindow):
 
         # Label field (required when Custom preset selected)
         self.label_input = QLineEdit("")
-        self.label_input.setPlaceholderText("Required label (only for Custom)")
+        self.label_input.setPlaceholderText("Required label")
 
         # Row 0: host/port/connect/status
         grid.addWidget(QLabel("Host"), 0, 0)
@@ -660,17 +660,22 @@ class MainWindow(QMainWindow):
     def _apply_preset_selection(self, preset_name: str) -> None:
         """
         When user selects a preset:
-          - Populate hex box with the preset bytes (if defined)
-          - Auto-fill label behavior:
-              - preset -> label fixed (disable label input)
-              - custom -> label required (enable label input)
+        - Preset: label is forced to preset name and label box is disabled
+        - Custom: label box is cleared + enabled and REQUIRED to send
         """
         if preset_name == CUSTOM_OPTION:
+            # Custom: user must provide a label, so clear anything old (prevents "Cancel" labeling)
             self.label_input.setEnabled(True)
-            # Don't overwrite user's current hex text for Custom.
+            self.label_input.setText("")  # <-- important fix
+            self.label_input.setPlaceholderText("Required label")
+
+            # Don't overwrite hex for Custom (user may be composing something)
+            # (leave hex_edit as-is)
         else:
+            # Preset: force the label to match the preset and prevent edits
             self.label_input.setText(preset_name)
             self.label_input.setEnabled(False)
+            self.label_input.setPlaceholderText("Required label")
 
             # Autofill hex if we have it (otherwise leave it as-is)
             preset_hex = PRESET_HEX.get(preset_name, "")
