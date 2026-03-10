@@ -29,8 +29,8 @@ from PySide6.QtWidgets import (
 # --------------------------------------------------------------------------------------
 # Hex parsing helpers
 # --------------------------------------------------------------------------------------
-HEX_CLEAN_RE = re.compile(r"\s+", re.MULTILINE)      # remove whitespace
-HEX_PREFIX_RE = re.compile(r"0x", re.IGNORECASE)     # remove optional 0x prefixes
+HEX_CLEAN_RE = re.compile(r"\s+", re.MULTILINE)  # remove whitespace
+HEX_PREFIX_RE = re.compile(r"0x", re.IGNORECASE)  # remove optional 0x prefixes
 
 # --------------------------------------------------------------------------------------
 # Connection + read timing
@@ -38,9 +38,9 @@ HEX_PREFIX_RE = re.compile(r"0x", re.IGNORECASE)     # remove optional 0x prefix
 CONNECT_TIMEOUT_S = 3.0
 
 # "Response read" timing (after you Send)
-FIRST_BYTE_TIMEOUT_S = 5.0        # wait this long for the first byte of a response
-RAW_IDLE_TIMEOUT_S = 1.50         # once bytes start flowing, stop after this idle period
-RAW_MAX_TOTAL_TIMEOUT_S = 15.0    # hard cap for a single read cycle
+FIRST_BYTE_TIMEOUT_S = 5.0  # wait this long for the first byte of a response
+RAW_IDLE_TIMEOUT_S = 1.50  # once bytes start flowing, stop after this idle period
+RAW_MAX_TOTAL_TIMEOUT_S = 15.0  # hard cap for a single read cycle
 
 # "Drain read" timing (before you Send)
 # This prevents stale/late bytes from being mislabeled as the next command’s response.
@@ -79,11 +79,10 @@ HISTORY_PATH = Path(__file__).resolve().parent / "tcp_hex_history.yaml"
 # Presets (YOU should replace these hex strings with your real commands)
 # --------------------------------------------------------------------------------------
 PRESET_HEX: dict[str, str] = {
-    "Ping": "0F31310E",          # example you used
-    "Cancel": "0237320306",      # example you used (STX '72' ETX ACK?) - adjust if needed
-    "Pair": "",                  # TODO
-    "Get Card": "",              # TODO
-    "Start Transaction": "",     # TODO
+    "Ping": "0F31310E",
+    "Cancel": "0237320306",
+    "Get Card": "",  # TODO
+    "Start Transaction": "",  # TODO
 }
 CUSTOM_OPTION = "Custom… (requires label)"
 
@@ -101,12 +100,12 @@ class HexParseResult:
 
 @dataclass
 class DeviceReadResult:
-    raw_wire_bytes: bytes     # all bytes received on the wire in this read cycle
-    leftover_buffer: bytes    # partial bytes we couldn't frame yet (kept for later)
+    raw_wire_bytes: bytes  # all bytes received on the wire in this read cycle
+    leftover_buffer: bytes  # partial bytes we couldn't frame yet (kept for later)
     note: str
     peer_closed: bool
     ack_sent_count: int
-    framed_count: int         # how many STX...ETX+LRC frames were recognized
+    framed_count: int  # how many STX...ETX+LRC frames were recognized
 
 
 class ConnectionClosedError(Exception):
@@ -256,8 +255,8 @@ def read_device_messages(
       - ACK each complete frame that doesn't start with 06/15/04.
       - Avoid mislabeling by returning leftover partial bytes.
     """
-    buffer = bytearray(initial_buffer)     # bytes not yet framed
-    wire = bytearray(initial_buffer)       # all bytes received on the wire this cycle
+    buffer = bytearray(initial_buffer)  # bytes not yet framed
+    wire = bytearray(initial_buffer)  # all bytes received on the wire this cycle
     peer_closed = False
     ack_sent_count = 0
     framed_total = 0
@@ -353,15 +352,15 @@ def read_device_messages(
 # Worker thread (all socket I/O lives here)
 # --------------------------------------------------------------------------------------
 class TcpWorker(QObject):
-    connected = Signal(str, int)                      # host, port
-    disconnected = Signal(str)                        # reason
+    connected = Signal(str, int)  # host, port
+    disconnected = Signal(str)  # reason
 
     # Send result for a labeled command
-    send_result = Signal(str, bytes, bytes, str)      # label, sent, received, note
-    send_error = Signal(str, bytes, str)              # label, sent, error message
+    send_result = Signal(str, bytes, bytes, str)  # label, sent, received, note
+    send_error = Signal(str, bytes, str)  # label, sent, error message
 
     # Any bytes that arrived BEFORE we sent a command (drain / unsolicited)
-    unsolicited = Signal(bytes, str)                  # bytes, note
+    unsolicited = Signal(bytes, str)  # bytes, note
 
     # General errors
     error = Signal(str)
@@ -442,7 +441,6 @@ class TcpWorker(QObject):
         if self._sock is None:
             return
 
-        # Quick non-blocking-ish drain
         result = read_device_messages(
             self._sock,
             self._recv_buffer,
@@ -452,10 +450,8 @@ class TcpWorker(QObject):
             auto_ack=True,
         )
 
-        # Save leftover partial bytes for later reads
         self._recv_buffer = result.leftover_buffer
 
-        # If any bytes came in, report them
         if result.raw_wire_bytes:
             self.unsolicited.emit(result.raw_wire_bytes, f"Drain: {result.note}")
 
@@ -534,6 +530,9 @@ class MainWindow(QMainWindow):
         self._connected_port = 0
         self._last_hex_result = parse_hex_input("")
         self._history_blocks: list[str] = []
+
+        # Prevents our "preset tamper detection" from triggering when we programmatically set hex.
+        self._suppress_hex_autoswitch = False
 
         self._build_ui()
         self._build_worker()
@@ -640,7 +639,10 @@ class MainWindow(QMainWindow):
     def _wire_events(self) -> None:
         self.connect_btn.clicked.connect(self._on_connect_toggle)
         self.send_btn.clicked.connect(self._on_send_clicked)
+
+        # IMPORTANT: hex text change does parsing + (new) preset tamper detection
         self.hex_edit.textChanged.connect(self._on_hex_text_changed)
+
         self.preset_combo.currentTextChanged.connect(self._apply_preset_selection)
         self.label_input.textChanged.connect(lambda: self._refresh_send_button_state())
 
@@ -711,6 +713,14 @@ class MainWindow(QMainWindow):
         }
         append_history_yaml(record)
 
+    def _clean_hex_for_compare(self, text: str) -> str:
+        """
+        Normalize hex so spaces/newlines/0x prefixes do not matter during comparisons.
+        """
+        cleaned = HEX_CLEAN_RE.sub("", text)
+        cleaned = HEX_PREFIX_RE.sub("", cleaned)
+        return cleaned.lower()
+
     # ----------------------- Presets -----------------------
 
     @Slot(str)
@@ -729,7 +739,12 @@ class MainWindow(QMainWindow):
 
             preset_hex = PRESET_HEX.get(preset_name, "")
             if preset_hex:
-                self.hex_edit.setPlainText(preset_hex)
+                # Prevent "hex changed" logic from immediately flipping us to Custom
+                self._suppress_hex_autoswitch = True
+                try:
+                    self.hex_edit.setPlainText(preset_hex)
+                finally:
+                    self._suppress_hex_autoswitch = False
 
         self._refresh_send_button_state()
 
@@ -767,6 +782,13 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_hex_text_changed(self) -> None:
+        """
+        Hex box changed:
+          1) Parse + update bytes preview + validation
+          2) If a preset is selected and user edits hex away from that preset, auto-switch to Custom
+             and blank the label (so we never log Ping with Cancel bytes, etc.).
+        """
+        # Always parse/update preview + validation first
         self._last_hex_result = parse_hex_input(self.hex_edit.toPlainText())
 
         if self._last_hex_result.is_valid:
@@ -775,6 +797,22 @@ class MainWindow(QMainWindow):
         else:
             self.hex_error_label.setText(self._last_hex_result.error)
             self.bytes_preview_edit.setPlainText("Invalid hex input.")
+
+        # If we set hex programmatically (preset autofill), don't autoswitch
+        if self._suppress_hex_autoswitch:
+            self._refresh_send_button_state()
+            return
+
+        # If a preset is selected and hex no longer matches preset hex, force Custom + blank label
+        preset = self.preset_combo.currentText()
+        if preset != CUSTOM_OPTION:
+            preset_hex = PRESET_HEX.get(preset, "")
+            current_clean = self._clean_hex_for_compare(self.hex_edit.toPlainText())
+            preset_clean = self._clean_hex_for_compare(preset_hex)
+
+            if current_clean != preset_clean:
+                # This triggers _apply_preset_selection(CUSTOM_OPTION), which clears/enables label.
+                self.preset_combo.setCurrentText(CUSTOM_OPTION)
 
         self._refresh_send_button_state()
 
