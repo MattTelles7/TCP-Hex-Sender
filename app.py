@@ -551,7 +551,7 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
 
-        self.host_input = QLineEdit("ci009ngppad-010")
+        self.host_input = QLineEdit("10.130.68.126")
         self.host_input.setPlaceholderText("Host")
 
         self.port_input = QSpinBox()
