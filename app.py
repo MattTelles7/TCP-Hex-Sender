@@ -76,13 +76,49 @@ ETX = 0x03
 HISTORY_PATH = Path(__file__).resolve().parent / "tcp_hex_history.yaml"
 
 # --------------------------------------------------------------------------------------
-# Presets (YOU should replace these hex strings with your real commands)
+# Presets
+# XPI commands are entered as their logical body, but the wire format the pinpad expects is:
+#   STX + body + ETX + LRC
+# Ping is the oddball: it is body + LRC with no STX/ETX.
 # --------------------------------------------------------------------------------------
+def _hex_text_to_bytes(raw_hex: str) -> bytes:
+    cleaned = HEX_CLEAN_RE.sub("", raw_hex)
+    cleaned = HEX_PREFIX_RE.sub("", cleaned)
+    return bytes.fromhex(cleaned)
+
+
+def _calculate_lrc(data: bytes) -> int:
+    lrc = 0
+    for byte in data:
+        lrc ^= byte
+    return lrc
+
+
+def _frame_xpi_command(body_hex: str) -> str:
+    body = _hex_text_to_bytes(body_hex)
+    body_with_etx = body + bytes([ETX])
+    frame = bytes([STX]) + body_with_etx + bytes([_calculate_lrc(body_with_etx)])
+    return " ".join(f"{byte:02X}" for byte in frame)
+
+
+_GET_CARD_BODY_HEX = (
+    "58 42 41 54 43 48 1C 58 49 46 4D 1C 53 4C 44 5F 43 52 44 5F 57 49 43 1C 31 "
+    "1E 58 53 50 56 1C 31 1C 43 41 50 54 49 4F 4E 1C 53 54 52 49 4E 47 1C 50 6C 65 "
+    "61 73 65 20 73 6C 69 64 65 2C 20 69 6E 73 65 72 74 2C 20 6F 72 1E 58 53 50 56 "
+    "1C 32 1C 43 41 50 54 49 4F 4E 1C 53 54 52 49 4E 47 1C 74 61 70 20 63 61 72 64 "
+    "1E 58 53 50 56 1C 37 1C 56 49 53 49 42 4C 45 1C 42 4F 4F 4C 1C 30 1E 58 53 50 "
+    "56 1C 33 1C 56 49 53 49 42 4C 45 1C 42 4F 4F 4C 1C 30 1E 58 53 50 56 1C 33 1C "
+    "43 41 50 54 49 4F 4E 1C 53 54 52 49 4E 47 1C 4C 61 6E 67 75 61 67 65 2F 4C 65 "
+    "6E 67 75 61 67 65 1E 58 53 50 56 1C 35 1C 43 41 50 54 49 4F 4E 1C 53 54 52 49 "
+    "4E 47 1C 41 6C 74 20 49 44 1E 58 53 46 4D 1C 31"
+)
+_START_TRANSACTION_BODY_HEX = "58 30 30 30"
+
 PRESET_HEX: dict[str, str] = {
     "Ping": "0F31310E",
-    "Cancel": "0237320306",
-    "Get Card": "58 42 41 54 43 48 1C 58 49 46 4D 1C 53 4C 44 5F 43 52 44 5F 57 49 43 1C 31 1E 58 53 50 56 1C 31 1C 43 41 50 54 49 4F 4E 1C 53 54 52 49 4E 47 1C 50 6C 65 61 73 65 20 73 6C 69 64 65 2C 20 69 6E 73 65 72 74 2C 20 6F 72 1E 58 53 50 56 1C 32 1C 43 41 50 54 49 4F 4E 1C 53 54 52 49 4E 47 1C 74 61 70 20 63 61 72 64 1E 58 53 50 56 1C 37 1C 56 49 53 49 42 4C 45 1C 42 4F 4F 4C 1C 30 1E 58 53 50 56 1C 33 1C 56 49 53 49 42 4C 45 1C 42 4F 4F 4C 1C 30 1E 58 53 50 56 1C 33 1C 43 41 50 54 49 4F 4E 1C 53 54 52 49 4E 47 1C 4C 61 6E 67 75 61 67 65 2F 4C 65 6E 67 75 61 67 65 1E 58 53 50 56 1C 35 1C 43 41 50 54 49 4F 4E 1C 53 54 52 49 4E 47 1C 41 6C 74 20 49 44 1E 58 53 46 4D 1C 31",
-    "Start Transaction": "58 30 30 30",
+    "Cancel": _frame_xpi_command("37 32"),
+    "Get Card": _frame_xpi_command(_GET_CARD_BODY_HEX),
+    "Start Transaction": _frame_xpi_command(_START_TRANSACTION_BODY_HEX),
 }
 CUSTOM_OPTION = "Custom… (requires label)"
 
